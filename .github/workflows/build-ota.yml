@@ -1,0 +1,104 @@
+name: Build OTA Updates
+
+on:
+  schedule:
+    # Check for updates daily
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    # Manual trigger option
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 cryptography
+
+      - name: Get latest release versions
+        id: get_versions
+        run: |
+          AVBROOT_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/avbroot/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "AVBROOT_VERSION=$AVBROOT_VERSION" >> $GITHUB_ENV
+
+          CUSTOTA_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/Custota/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "CUSTOTA_VERSION=$CUSTOTA_VERSION" >> $GITHUB_ENV
+
+          KERNELSU_VERSION=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.tag_name')
+          echo "KERNELSU_VERSION=$KERNELSU_VERSION" >> $GITHUB_ENV
+
+      - name: Download and setup avbroot
+        run: |
+          curl -L -o avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip avbroot.zip
+          rm avbroot.zip
+          chmod +x avbroot
+          sudo mv avbroot /usr/local/bin/
+
+      - name: Download and setup custota-tool
+        run: |
+          curl -L -o custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip custota-tool.zip
+          rm custota-tool.zip
+          chmod +x custota-tool
+          sudo mv custota-tool /usr/local/bin/
+
+      - name: Clone or download KernelSU Next
+        run: |
+          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.assets[] | select(.name | contains("boot.img")) | .browser_download_url' | head -n 1)
+
+          if [ -n "$BOOT_IMAGE_URL" ]; then
+            echo "Using prebuilt KernelSU Next boot image"
+            curl -L -o boot_ksu.img.gz "$BOOT_IMAGE_URL"
+            gunzip boot_ksu.img.gz
+            mv boot_ksu.img patched_boot.img
+          else
+            echo "Using KernelSU Next sources for patching"
+            git clone https://github.com/KernelSU-Next/KernelSU-Next KernelSU
+          fi
+
+      - name: Setup signing keys
+        run: |
+          echo "${{ secrets.AVB_KEY }}" > avb_key.pem
+          echo "${{ secrets.CUSTOTA_KEY }}" > custota_key.pem
+          echo "${{ secrets.CUSTOTA_CERT }}" > custota_cert.pem
+
+      - name: Fetch latest OTA update
+        run: |
+          python ./.github/scripts/fetch_ota.py
+
+      - name: Process OTA with avbroot
+        run: |
+          avbroot extract-boot --input ./ota.zip --output ./boot.img
+
+          if [ ! -f patched_boot.img ]; then
+            python3 -m KernelSU.scripts.ksubot -k ./boot.img -o ./patched_boot.img
+          fi
+
+          avbroot patch-boot --input ./ota.zip --boot-image ./patched_boot.img --output ./patched.zip --key ./avb_key.pem
+
+      - name: Process with custota-tool
+        run: |
+          custota-tool make-ota --input patched.zip --output custota.zip --key custota_key.pem
+
+      - name: Generate metadata and site content
+        run: |
+          python ./.github/scripts/generate_metadata.py
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: ./site
+          branch: gh-pages
