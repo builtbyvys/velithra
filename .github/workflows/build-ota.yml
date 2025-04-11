@@ -191,7 +191,7 @@ jobs:
           echo "ROOT_RELEASE_NAME=${DEVICE_NAME}-${TAG_DATE}-root-${COMMIT_HASH}" >> $GITHUB_ENV
       
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: root-ota
           path: |
@@ -310,7 +310,7 @@ jobs:
           echo "ROOTLESS_RELEASE_NAME=${DEVICE_NAME}-${TAG_DATE}-rootless-${COMMIT_HASH}" >> $GITHUB_ENV
       
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: rootless-ota
           path: |
