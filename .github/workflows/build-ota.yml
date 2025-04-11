@@ -2,216 +2,198 @@ name: Build OTA Update
 
 on:
   schedule:
-    - cron: "0 */6 * * *" # Every 6 hours
+    - cron: "0 */6 * * *"  # Every 6 hours
   workflow_dispatch:
 
 jobs:
-  build-root:
+  download-ota:
     runs-on: ubuntu-latest
+    outputs:
+      date_tag: ${{ steps.meta.outputs.date_tag }}
+      commit_hash: ${{ steps.meta.outputs.commit_hash }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
+
+      - name: Setup metadata
+        id: meta
+        run: |
+          echo "date_tag=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.10"
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 cryptography aiohttp selectolax
-      - name: Get latest release versions
-        id: get_versions
+          pip install -U requests beautifulsoup4 cryptography aiohttp selectolax
+
+      - name: Fetch latest OTA update
+        run: python .github/scripts/build_ota.py
+
+      - name: Upload downloaded OTA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ota-zip
+          path: ota.zip
+
+  build-root:
+    needs: download-ota
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          pip install -U requests beautifulsoup4 cryptography aiohttp selectolax
+
+      - name: Download OTA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ota-zip
+
+      - name: Setup tools
         run: |
           AVBROOT_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/avbroot/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "AVBROOT_VERSION=$AVBROOT_VERSION" >> $GITHUB_ENV
+          curl -L -o avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip avbroot.zip
+          sudo mv avbroot /usr/local/bin/
+
           CUSTOTA_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/Custota/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "CUSTOTA_VERSION=$CUSTOTA_VERSION" >> $GITHUB_ENV
-          KERNELSU_VERSION=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.tag_name')
-          echo "KERNELSU_VERSION=$KERNELSU_VERSION" >> $GITHUB_ENV
-      - name: Download and setup avbroot
-        run: |
-          mkdir -p /tmp/avbroot
-          curl -L -o /tmp/avbroot/avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip /tmp/avbroot/avbroot.zip -d /tmp/avbroot/
-          chmod +x /tmp/avbroot/avbroot
-          sudo mv /tmp/avbroot/avbroot /usr/local/bin/
-          rm -rf /tmp/avbroot
-      - name: Download and setup custota-tool
-        run: |
-          mkdir -p /tmp/custota
-          curl -L -o /tmp/custota/custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip /tmp/custota/custota-tool.zip -d /tmp/custota/
-          chmod +x /tmp/custota/custota-tool
-          sudo mv /tmp/custota/custota-tool /usr/local/bin/
-          rm -rf /tmp/custota
-      - name: Clone or download KernelSU Next
+          curl -L -o custota.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip custota.zip
+          sudo mv custota-tool /usr/local/bin/
+
+      - name: Setup KernelSU prebuilt boot.img
         run: |
           BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '[.assets[] | select(.name | contains("boot.img.gz") and contains("6.1.99"))][0].browser_download_url')
-          if [ -n "$BOOT_IMAGE_URL" ]; then
-            echo "Using prebuilt KernelSU Next boot image"
-            curl -L -o boot_ksu.img.gz "$BOOT_IMAGE_URL"
-            gunzip boot_ksu.img.gz
-            mv boot_ksu.img patched_boot.img
-          else
-            echo "Using KernelSU Next sources for patching"
-            git clone https://github.com/KernelSU-Next/KernelSU-Next KernelSU
-          fi
+          curl -L "$BOOT_IMAGE_URL" -o boot.img.gz
+          gunzip boot.img.gz
+          mv boot.img patched_boot.img
+
       - name: Setup signing keys
         run: |
           echo "${{ secrets.AVB_KEY }}" > avb_key.pem
           echo "${{ secrets.CUSTOTA_KEY }}" > custota_key.pem
           echo "${{ secrets.CUSTOTA_CERT }}" > custota_cert.pem
-      - name: Fetch latest OTA update
-        run: |
-          python .github/scripts/build_ota.py
+
       - name: Build root OTA
         run: |
           mkdir -p root
-          echo "[velithra] Building OTA with KernelSU Next"
-          avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --prepatched ./patched_boot.img --output ./root/cheetah.zip
-          custota-tool gen-csig --input ./root/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.csig
-          custota-tool gen-update-info --file ./root/cheetah.json --location ./root/cheetah.csig
-      - name: Upload root artifacts
+          avbroot ota patch --input ota.zip --key-avb avb_key.pem --key-ota custota_key.pem --cert-ota custota_cert.pem --prepatched patched_boot.img --output root/cheetah.zip
+          custota-tool gen-csig --input root/cheetah.zip --key custota_key.pem --cert custota_cert.pem --output root/cheetah.csig
+          custota-tool gen-update-info --file root/cheetah.json --location root/cheetah.csig
+
+      - name: Rename root files
+        run: |
+          mv root/cheetah.zip root/cheetah-${{ needs.download-ota.outputs.date_tag }}-root-${{ needs.download-ota.outputs.commit_hash }}.zip
+          mv root/cheetah.csig root/cheetah-${{ needs.download-ota.outputs.date_tag }}-root-${{ needs.download-ota.outputs.commit_hash }}.csig
+          mv root/cheetah.json root/cheetah.json
+
+      - name: Upload root folder
         uses: actions/upload-artifact@v4
         with:
-          name: root-ota-zip
-          path: root/cheetah.zip
-      - name: Upload root csig
-        uses: actions/upload-artifact@v4
-        with:
-          name: root-ota-csig
-          path: root/cheetah.csig
-      - name: Upload root JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: root-ota-json
-          path: root/cheetah.json
-      - name: Upload versions text
-        uses: actions/upload-artifact@v4
-        with:
-          name: ota-versions
-          path: ota_versions.txt
+          name: root
+          path: root
 
   build-rootless:
+    needs: download-ota
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
         with:
           python-version: "3.10"
-      - name: Cache pip dependencies
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 cryptography aiohttp selectolax
-      - name: Get latest release versions
-        id: get_versions
+          pip install -U requests beautifulsoup4 cryptography aiohttp selectolax
+
+      - name: Download OTA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ota-zip
+
+      - name: Setup tools (same as root)
         run: |
           AVBROOT_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/avbroot/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "AVBROOT_VERSION=$AVBROOT_VERSION" >> $GITHUB_ENV
+          curl -L -o avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip avbroot.zip
+          sudo mv avbroot /usr/local/bin/
+
           CUSTOTA_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/Custota/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "CUSTOTA_VERSION=$CUSTOTA_VERSION" >> $GITHUB_ENV
-          KERNELSU_VERSION=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.tag_name')
-          echo "KERNELSU_VERSION=$KERNELSU_VERSION" >> $GITHUB_ENV
-      - name: Download and setup avbroot
-        run: |
-          mkdir -p /tmp/avbroot
-          curl -L -o /tmp/avbroot/avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip /tmp/avbroot/avbroot.zip -d /tmp/avbroot/
-          chmod +x /tmp/avbroot/avbroot
-          sudo mv /tmp/avbroot/avbroot /usr/local/bin/
-          rm -rf /tmp/avbroot
-      - name: Download and setup custota-tool
-        run: |
-          mkdir -p /tmp/custota
-          curl -L -o /tmp/custota/custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip /tmp/custota/custota-tool.zip -d /tmp/custota/
-          chmod +x /tmp/custota/custota-tool
-          sudo mv /tmp/custota/custota-tool /usr/local/bin/
-          rm -rf /tmp/custota
-      - name: Clone or download KernelSU Next
-        run: |
-          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '[.assets[] | select(.name | contains("boot.img.gz") and contains("6.1.99"))][0].browser_download_url')
-          if [ -n "$BOOT_IMAGE_URL" ]; then
-            echo "Using prebuilt KernelSU Next boot image"
-            curl -L -o boot_ksu.img.gz "$BOOT_IMAGE_URL"
-            gunzip boot_ksu.img.gz
-            mv boot_ksu.img patched_boot.img
-          else
-            echo "Using KernelSU Next sources for patching"
-            git clone https://github.com/KernelSU-Next/KernelSU-Next KernelSU
-          fi
+          curl -L -o custota.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip custota.zip
+          sudo mv custota-tool /usr/local/bin/
+
       - name: Setup signing keys
         run: |
           echo "${{ secrets.AVB_KEY }}" > avb_key.pem
           echo "${{ secrets.CUSTOTA_KEY }}" > custota_key.pem
           echo "${{ secrets.CUSTOTA_CERT }}" > custota_cert.pem
-      - name: Fetch latest OTA update
-        run: |
-          python .github/scripts/build_ota.py
+
       - name: Build rootless OTA
         run: |
           mkdir -p rootless
-          echo "[velithra] Building stock OTA without root"
-          avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --output ./rootless/cheetah.zip --rootless
-          custota-tool gen-csig --input ./rootless/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./rootless/cheetah.csig
-          custota-tool gen-update-info --file ./rootless/cheetah.json --location ./rootless/cheetah.csig
-      - name: Upload rootless artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootless-ota-zip
-          path: rootless/cheetah.zip
-      - name: Upload rootless csig
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootless-ota-csig
-          path: rootless/cheetah.csig
-      - name: Upload rootless JSON
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootless-ota-json
-          path: rootless/cheetah.json
-      - name: Upload versions text
-        uses: actions/upload-artifact@v4
-        with:
-          name: ota-versions
-          path: ota_versions.txt
+          avbroot ota patch --input ota.zip --key-avb avb_key.pem --key-ota custota_key.pem --cert-ota custota_cert.pem --output rootless/cheetah.zip --rootless
+          custota-tool gen-csig --input rootless/cheetah.zip --key custota_key.pem --cert custota_cert.pem --output rootless/cheetah.csig
+          custota-tool gen-update-info --file rootless/cheetah.json --location rootless/cheetah.csig
 
-  deploy:
+      - name: Rename rootless files
+        run: |
+          mv rootless/cheetah.zip rootless/cheetah-${{ needs.download-ota.outputs.date_tag }}-rootless-${{ needs.download-ota.outputs.commit_hash }}.zip
+          mv rootless/cheetah.csig rootless/cheetah-${{ needs.download-ota.outputs.date_tag }}-rootless-${{ needs.download-ota.outputs.commit_hash }}.csig
+          mv rootless/cheetah.json rootless/cheetah.json
+
+      - name: Upload rootless folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootless
+          path: rootless
+
+  release:
+    needs: [build-root, build-rootless, download-ota]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download root/rootless folders
+        uses: actions/download-artifact@v4
+        with:
+          path: .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.download-ota.outputs.date_tag }}
+          name: OTA ${{ needs.download-ota.outputs.date_tag }}
+          files: |
+            root/*.zip
+            root/*.csig
+            rootless/*.zip
+            rootless/*.csig
+
+  deploy-pages:
     needs: [build-root, build-rootless]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Deploy OTA to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+      - uses: actions/checkout@v3
+
+      - name: Download folders
+        uses: actions/download-artifact@v4
         with:
-          folder: .
-          branch: gh-pages
-          git-config-name: "GitHub Actions"
-          git-config-email: "actions@github.com"
-          clean: true
-          target-folder: .
-          files: |
-            root/cheetah.json
-            rootless/cheetah.json
-            ota_versions.txt
+          path: .
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          keep_files: true
