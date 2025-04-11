@@ -22,7 +22,7 @@ on:
 env:
   PYTHON_VERSION: "3.10"
   DEVICE_NAME: "cheetah"
-  TAG_DATE: ${{ github.event.inputs.release_tag || format('{0:yyyyMMdd}', github.event.schedule) || format('{0:yyyyMMdd}', github.event.repository.updated_at) }}
+  TAG_DATE: ${{ github.event.inputs.release_tag || format('{0:yyyyMMdd}', github.run_started_at) }}
 
 jobs:
   setup-environment:
