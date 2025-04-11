@@ -200,6 +200,7 @@ jobs:
       - name: Upload root OTA to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GH_TOKEN }}
           files: |
             root/${{ env.ROOT_FILE_BASE }}.zip
             root/${{ env.ROOT_FILE_BASE }}.csig
@@ -318,6 +319,7 @@ jobs:
       - name: Upload rootless OTA to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.GH_TOKEN }}
           files: |
             rootless/${{ env.ROOTLESS_FILE_BASE }}.zip
             rootless/${{ env.ROOTLESS_FILE_BASE }}.csig
