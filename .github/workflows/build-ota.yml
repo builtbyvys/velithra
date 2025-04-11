@@ -1,14 +1,83 @@
-name: Build OTA Updates
+name: Build OTA Update
 
 on:
   schedule:
-    # Check for updates daily
-    - cron: "0 0 * * *"
+    - cron: "0 */6 * * *" # Every 6 hours
   workflow_dispatch:
-    # Manual trigger option
+    inputs:
+      release_tag:
+        description: "Custom release tag (default: current date YYYYMMDD)"
+        required: false
+        type: string
+      skip_rootless:
+        description: "Skip rootless build"
+        required: false
+        type: boolean
+        default: false
+      ota_build:
+        description: "OTA build number (e.g. bp1a.250405.007.b1)"
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.10"
+  DEVICE_NAME: "cheetah"
+  TAG_DATE: ${{ github.event.inputs.release_tag || format('{0:yyyyMMdd}', github.run_started_at) }}
 
 jobs:
-  build:
+  setup-environment:
+    name: Setup common environment
+    runs-on: ubuntu-latest
+    outputs:
+      avbroot_version: ${{ steps.get_versions.outputs.avbroot_version }}
+      custota_version: ${{ steps.get_versions.outputs.custota_version }}
+      kernelsu_version: ${{ steps.get_versions.outputs.kernelsu_version }}
+      commit_hash: ${{ steps.git_info.outputs.commit_hash }}
+      tag_date: ${{ steps.date_info.outputs.tag_date }}
+      ota_build: ${{ steps.ota_info.outputs.ota_build }}
+      original_ota_name: ${{ steps.ota_info.outputs.original_ota_name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get git info
+        id: git_info
+        run: |
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          echo "commit_hash=${COMMIT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Set date info
+        id: date_info
+        run: |
+          TAG_DATE="${{ env.TAG_DATE || format('{0:yyyyMMdd}', github.event.repository.updated_at) }}"
+          echo "tag_date=${TAG_DATE}" >> $GITHUB_OUTPUT
+
+      - name: Set OTA info
+        id: ota_info
+        run: |
+          OTA_BUILD="${{ github.event.inputs.ota_build || 'bp1a.250405.007.b1' }}"
+          ORIGINAL_OTA_NAME="${{ env.DEVICE_NAME }}-ota-${OTA_BUILD}"
+          echo "ota_build=${OTA_BUILD}" >> $GITHUB_OUTPUT
+          echo "original_ota_name=${ORIGINAL_OTA_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Get latest tool versions
+        id: get_versions
+        run: |
+          AVBROOT_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/avbroot/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "avbroot_version=${AVBROOT_VERSION}" >> $GITHUB_OUTPUT
+
+          CUSTOTA_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/Custota/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "custota_version=${CUSTOTA_VERSION}" >> $GITHUB_OUTPUT
+
+          KERNELSU_VERSION=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.tag_name')
+          echo "kernelsu_version=${KERNELSU_VERSION}" >> $GITHUB_OUTPUT
+
+  build-root:
+    name: Build Root OTA
+    needs: setup-environment
     runs-on: ubuntu-latest
 
     steps:
@@ -20,45 +89,38 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 cryptography
+          pip install requests beautifulsoup4 cryptography aiohttp selectolax
 
-      - name: Get latest release versions
-        id: get_versions
+      - name: Install tools
+        env:
+          AVBROOT_VERSION: ${{ needs.setup-environment.outputs.avbroot_version }}
+          CUSTOTA_VERSION: ${{ needs.setup-environment.outputs.custota_version }}
         run: |
-          AVBROOT_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/avbroot/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "AVBROOT_VERSION=$AVBROOT_VERSION" >> $GITHUB_ENV
+          # Install avbroot
+          mkdir -p /tmp/avbroot
+          curl -L -o /tmp/avbroot/avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/avbroot/avbroot.zip -d /tmp/avbroot/
+          chmod +x /tmp/avbroot/avbroot
+          sudo mv /tmp/avbroot/avbroot /usr/local/bin/
 
-          CUSTOTA_VERSION=$(curl -s https://api.github.com/repos/chenxiaolong/Custota/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-          echo "CUSTOTA_VERSION=$CUSTOTA_VERSION" >> $GITHUB_ENV
+          # Install custota-tool
+          mkdir -p /tmp/custota
+          curl -L -o /tmp/custota/custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/custota/custota-tool.zip -d /tmp/custota/
+          chmod +x /tmp/custota/custota-tool
+          sudo mv /tmp/custota/custota-tool /usr/local/bin/
 
-          KERNELSU_VERSION=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.tag_name')
-          echo "KERNELSU_VERSION=$KERNELSU_VERSION" >> $GITHUB_ENV
+          # Clean up
+          rm -rf /tmp/avbroot /tmp/custota
 
-      - name: Download and setup avbroot
+      - name: Prepare KernelSU Next
         run: |
-          curl -L -o avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip avbroot.zip
-          rm avbroot.zip
-          chmod +x avbroot
-          sudo mv avbroot /usr/local/bin/
-
-      - name: Download and setup custota-tool
-        run: |
-          curl -L -o custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip custota-tool.zip
-          rm custota-tool.zip
-          chmod +x custota-tool
-          sudo mv custota-tool /usr/local/bin/
-
-      - name: Clone or download KernelSU Next
-        run: |
-          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.assets[] | select(.name | contains("boot.img")) | .browser_download_url' | head -n 1)
-
+          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '[.assets[] | select(.name | contains("boot.img.gz") and contains("6.1.99"))][0].browser_download_url')
           if [ -n "$BOOT_IMAGE_URL" ]; then
             echo "Using prebuilt KernelSU Next boot image"
             curl -L -o boot_ksu.img.gz "$BOOT_IMAGE_URL"
@@ -66,7 +128,7 @@ jobs:
             mv boot_ksu.img patched_boot.img
           else
             echo "Using KernelSU Next sources for patching"
-            git clone https://github.com/KernelSU-Next/KernelSU-Next KernelSU
+            git clone --depth=1 https://github.com/KernelSU-Next/KernelSU-Next KernelSU
           fi
 
       - name: Setup signing keys
@@ -76,29 +138,291 @@ jobs:
           echo "${{ secrets.CUSTOTA_CERT }}" > custota_cert.pem
 
       - name: Fetch latest OTA update
+        env:
+          ORIGINAL_OTA_NAME: ${{ needs.setup-environment.outputs.original_ota_name }}
         run: |
-          python ./.github/scripts/fetch_ota.py
+          python .github/scripts/build_ota.py
 
-      - name: Process OTA with avbroot
+      - name: Build root OTA
+        env:
+          DEVICE_NAME: ${{ env.DEVICE_NAME }}
+          TAG_DATE: ${{ needs.setup-environment.outputs.tag_date }}
+          COMMIT_HASH: ${{ needs.setup-environment.outputs.commit_hash }}
+          ORIGINAL_OTA_NAME: ${{ needs.setup-environment.outputs.original_ota_name }}
         run: |
-          avbroot extract-boot --input ./ota.zip --output ./boot.img
+          mkdir -p root
 
-          if [ ! -f patched_boot.img ]; then
-            python3 -m KernelSU.scripts.ksubot -k ./boot.img -o ./patched_boot.img
+          # Set output filename
+          ROOT_FILE_BASE="${DEVICE_NAME}-${TAG_DATE}-root-${COMMIT_HASH}"
+          echo "ROOT_FILE_BASE=${ROOT_FILE_BASE}" >> $GITHUB_ENV
+
+          echo "[velithra] Building Root OTA with KernelSU Next & AVB keys"
+          avbroot ota patch \
+            --input ./${ORIGINAL_OTA_NAME}.zip \
+            --key-avb ./avb_key.pem \
+            --key-ota ./custota_key.pem \
+            --cert-ota ./custota_cert.pem \
+            --prepatched ./patched_boot.img \
+            --output ./root/${ROOT_FILE_BASE}.zip
+
+          # Generate signature and update info
+          custota-tool gen-csig \
+            --input ./root/${ROOT_FILE_BASE}.zip \
+            --key ./custota_key.pem \
+            --cert ./custota_cert.pem \
+            --output ./root/${ROOT_FILE_BASE}.csig
+
+          custota-tool gen-update-info \
+            --file ./root/${ROOT_FILE_BASE}.json \
+            --location ./root/${ROOT_FILE_BASE}.csig
+
+      - name: Compress Root OTA with zstd
+        run: |
+          zstd -19 -T0 -f ./root/${{ env.ROOT_FILE_BASE }}.zip -o ./root/${{ env.ROOT_FILE_BASE }}.zip.zst
+
+      - name: Generate release info for root OTA
+        env:
+          DEVICE_NAME: ${{ env.DEVICE_NAME }}
+          TAG_DATE: ${{ needs.setup-environment.outputs.tag_date }}
+          COMMIT_HASH: ${{ needs.setup-environment.outputs.commit_hash }}
+        run: |
+          echo "ROOT_RELEASE_NAME=${DEVICE_NAME}-${TAG_DATE}-root-${COMMIT_HASH}" >> $GITHUB_ENV
+
+      - name: Upload artifacts for root OTA
+        uses: actions/upload-artifact@v4
+        with:
+          name: root-ota
+          path: |
+            root/${{ env.ROOT_FILE_BASE }}.json
+          retention-days: 3
+
+      - name: Upload root OTA to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          files: |
+            root/${{ env.ROOT_FILE_BASE }}.zip.zst
+          tag_name: "${{ needs.setup-environment.outputs.tag_date }}"
+          name: ${{ env.ROOT_RELEASE_NAME }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-rootless:
+    name: Build Rootless OTA
+    needs: setup-environment
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_rootless }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 cryptography aiohttp selectolax
+
+      - name: Install tools
+        env:
+          AVBROOT_VERSION: ${{ needs.setup-environment.outputs.avbroot_version }}
+          CUSTOTA_VERSION: ${{ needs.setup-environment.outputs.custota_version }}
+        run: |
+          # Install avbroot
+          mkdir -p /tmp/avbroot
+          curl -L -o /tmp/avbroot/avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/avbroot/avbroot.zip -d /tmp/avbroot/
+          chmod +x /tmp/avbroot/avbroot
+          sudo mv /tmp/avbroot/avbroot /usr/local/bin/
+
+          # Install custota-tool
+          mkdir -p /tmp/custota
+          curl -L -o /tmp/custota/custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/custota/custota-tool.zip -d /tmp/custota/
+          chmod +x /tmp/custota/custota-tool
+          sudo mv /tmp/custota/custota-tool /usr/local/bin/
+
+          # Clean up
+          rm -rf /tmp/avbroot /tmp/custota
+
+      - name: Setup signing keys
+        run: |
+          echo "${{ secrets.AVB_KEY }}" > avb_key.pem
+          echo "${{ secrets.CUSTOTA_KEY }}" > custota_key.pem
+          echo "${{ secrets.CUSTOTA_CERT }}" > custota_cert.pem
+
+      - name: Fetch latest OTA update
+        run: |
+          python .github/scripts/build_ota.py
+
+      - name: Build rootless OTA
+        env:
+          DEVICE_NAME: ${{ env.DEVICE_NAME }}
+          TAG_DATE: ${{ needs.setup-environment.outputs.tag_date }}
+          COMMIT_HASH: ${{ needs.setup-environment.outputs.commit_hash }}
+          ORIGINAL_OTA_NAME: ${{ needs.setup-environment.outputs.original_ota_name }}
+        run: |
+          mkdir -p rootless
+
+          # Set output filename
+          ROOTLESS_FILE_BASE="${DEVICE_NAME}-${TAG_DATE}-rootless-${COMMIT_HASH}"
+          echo "ROOTLESS_FILE_BASE=${ROOTLESS_FILE_BASE}" >> $GITHUB_ENV
+
+          echo "[velithra] Building Rootless OTA with AVB keys"
+          avbroot ota patch \
+            --input ./${ORIGINAL_OTA_NAME}.zip \
+            --key-avb ./avb_key.pem \
+            --key-ota ./custota_key.pem \
+            --cert-ota ./custota_cert.pem \
+            --rootless \
+            --output ./rootless/${ROOTLESS_FILE_BASE}.zip
+
+          # Generate signature and update info
+          custota-tool gen-csig \
+            --input ./rootless/${ROOTLESS_FILE_BASE}.zip \
+            --key ./custota_key.pem \
+            --cert ./custota_cert.pem \
+            --output ./rootless/${ROOTLESS_FILE_BASE}.csig
+
+          custota-tool gen-update-info \
+            --file ./rootless/${ROOTLESS_FILE_BASE}.json \
+            --location ./rootless/${ROOTLESS_FILE_BASE}.csig
+
+      - name: Compress Rootless OTA with zstd
+        run: |
+          zstd -19 -T0 -f ./rootless/${{ env.ROOTLESS_FILE_BASE }}.zip -o ./rootless/${{ env.ROOTLESS_FILE_BASE }}.zip.zst
+
+      - name: Generate release info for rootless OTA
+        env:
+          DEVICE_NAME: ${{ env.DEVICE_NAME }}
+          TAG_DATE: ${{ needs.setup-environment.outputs.tag_date }}
+          COMMIT_HASH: ${{ needs.setup-environment.outputs.commit_hash }}
+        run: |
+          echo "ROOTLESS_RELEASE_NAME=${DEVICE_NAME}-${TAG_DATE}-rootless-${COMMIT_HASH}" >> $GITHUB_ENV
+
+      - name: Upload artifacts for rootless OTA
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootless-ota
+          path: |
+            rootless/${{ env.ROOTLESS_FILE_BASE }}.json
+          retention-days: 3
+
+      - name: Upload rootless OTA to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          files: |
+            rootless/${{ env.ROOTLESS_FILE_BASE }}.zip.zst
+          tag_name: "${{ needs.setup-environment.outputs.tag_date }}"
+          name: ${{ env.ROOTLESS_RELEASE_NAME }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  deploy-to-gh-pages:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [setup-environment, build-root, build-rootless]
+    if: success()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Download all workflow artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Set file variables and check artifacts
+        run: |
+          DEVICE_NAME="${{ env.DEVICE_NAME }}"
+          TAG_DATE="${{ needs.setup-environment.outputs.tag_date }}"
+          COMMIT_HASH="${{ needs.setup-environment.outputs.commit_hash }}"
+
+          ROOT_FILE_BASE="${DEVICE_NAME}-${TAG_DATE}-root-${COMMIT_HASH}"
+          ROOTLESS_FILE_BASE="${DEVICE_NAME}-${TAG_DATE}-rootless-${COMMIT_HASH}"
+
+          echo "ROOT_FILE_BASE=${ROOT_FILE_BASE}" >> $GITHUB_ENV
+          echo "ROOTLESS_FILE_BASE=${ROOTLESS_FILE_BASE}" >> $GITHUB_ENV
+
+          HAS_ROOT_ARTIFACTS=false
+          HAS_ROOTLESS_ARTIFACTS=false
+
+          if [ -d "root-ota" ]; then
+            HAS_ROOT_ARTIFACTS=true
           fi
 
-          avbroot patch-boot --input ./ota.zip --boot-image ./patched_boot.img --output ./patched.zip --key ./avb_key.pem
+          if [ -d "rootless-ota" ]; then
+            HAS_ROOTLESS_ARTIFACTS=true
+          fi
 
-      - name: Process with custota-tool
-        run: |
-          custota-tool make-ota --input patched.zip --output custota.zip --key custota_key.pem
+          echo "HAS_ROOT_ARTIFACTS=${HAS_ROOT_ARTIFACTS}" >> $GITHUB_ENV
+          echo "HAS_ROOTLESS_ARTIFACTS=${HAS_ROOTLESS_ARTIFACTS}" >> $GITHUB_ENV
 
-      - name: Generate metadata and site content
+      - name: Prepare deployment structure
         run: |
-          python ./.github/scripts/generate_metadata.py
+          mkdir -p gh-pages
+
+          if [ "$HAS_ROOT_ARTIFACTS" = true ]; then
+            mkdir -p gh-pages/root
+            cp root/${ROOT_FILE_BASE}.zip.zst gh-pages/root/
+            cp root/${ROOT_FILE_BASE}.json gh-pages/root/${DEVICE_NAME}.json
+          fi
+
+          if [ "$HAS_ROOTLESS_ARTIFACTS" = true ]; then
+            mkdir -p gh-pages/rootless
+            cp rootless/${ROOTLESS_FILE_BASE}.zip.zst gh-pages/rootless/
+            cp rootless/${ROOTLESS_FILE_BASE}.json gh-pages/rootless/${DEVICE_NAME}.json
+          fi
+
+          {
+            echo "# Velithra OTA Updates"
+            echo ""
+            echo "Last updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "## Available Updates"
+            echo ""
+            echo "### Root Updates"
+            if [ "$HAS_ROOT_ARTIFACTS" = true ]; then
+              echo "- [Download Root OTA (zstd compressed)](root/${ROOT_FILE_BASE}.zip.zst)"
+              echo "- [Root Update JSON](root/${DEVICE_NAME}.json)"
+            else
+              echo "No root OTA available in this build."
+            fi
+            echo ""
+            echo "### Rootless Updates"
+            if [ "$HAS_ROOTLESS_ARTIFACTS" = true ]; then
+              echo "- [Download Rootless OTA (zstd compressed)](rootless/${ROOTLESS_FILE_BASE}.zip.zst)"
+              echo "- [Rootless Update JSON](rootless/${DEVICE_NAME}.json)"
+            else
+              echo "No rootless OTA available in this build."
+            fi
+            echo ""
+            echo "## Installation Instructions"
+            echo "Please refer to [installation documentation](https://github.com/${GITHUB_REPOSITORY}/wiki/Installation) for detailed instructions."
+            echo ""
+            echo "## Version Information"
+            echo "- Build date: ${TAG_DATE}"
+            echo "- Original OTA build: ${{ needs.setup-environment.outputs.ota_build }}"
+            echo "- Commit: ${COMMIT_HASH}"
+            echo "- KernelSU version: ${{ needs.setup-environment.outputs.kernelsu_version }}"
+          } > gh-pages/README.md
 
       - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: peaceiris/actions-gh-pages@v3
         with:
-          folder: ./site
-          branch: gh-pages
+          github_token: ${{ secrets.GH_TOKEN }}
+          publish_dir: ./gh-pages
+          keep_files: true
+          user_name: "github-actions[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Deploy OTA updates (${{ needs.setup-environment.outputs.tag_date }})"

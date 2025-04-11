@@ -1,107 +1,102 @@
-#!/usr/bin/env python3
+from asyncio import create_task, sleep
+from dataclasses import dataclass, field
+from http.cookies import BaseCookie
+from os import getenv, path, makedirs
+from re import compile
 
-import hashlib
-import json
-import os
-import urllib.parse
+from aiohttp import ClientSession
+from selectolax.lexbor import LexborHTMLParser
 
-import requests
-from bs4 import BeautifulSoup
+deviceCodeName = getenv("DEVICE_CODE_NAME", "cheetah")
 
-DEVICE = "cheetah"
-BUILD_PREFIX = "TQ"
-GOOGLE_OTA_URL = "https://developers.google.com/android/ota"
-
-
-def fetch_ota():
-    response = requests.get(GOOGLE_OTA_URL)
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    ota_links = []
-    for link in soup.find_all("a"):
-        href = link.get("href")
-        if href and DEVICE in href and href.endswith(".zip") and BUILD_PREFIX in href:
-            ota_links.append(href)
-
-    return ota_links
+regexPattern = compile(
+    r"(\d+\.\d+\.\d+)\s\((\w+\.\w+\.\w+)(\.[^,]+)?,\s(\w+\s\w+)(,\s.+)?\)"
+)
 
 
-def get_latest():
-    try:
-        with open("./site/root/metadata.json", "r") as f:
-            metadata = json.load(f)
-            return metadata.get("current_build", "")
-    except (FileNotFoundError, json.JSONDecodeError):
-        try:
-            with open("./site/metadata.json", "r") as f:
-                metadata = json.load(f)
-                return metadata.get("current_build", "")
-        except (FileNotFoundError, json.JSONDecodeError):
-            return ""
+@dataclass
+class OTAInfo:
+    androidVer: str
+    buildVer: str
+    subVer: str | None
+    date: str
+    user: str | None
+    DLLink: str
+    fName: str = field(init=False)
+    fullName: str = field(init=False)
+
+    def __post_init__(self):
+        self.fullName = self.DLLink.split("/")[-1]
+        name, ext = self.fullName.rsplit(".", 1)
+        parts = name.split("-")
+        # Drop last part if it looks like a hash (8+ hex chars)
+        if len(parts[-1]) >= 8 and all(c in "0123456789abcdef" for c in parts[-1].lower()):
+            name = "-".join(parts[:-1])
+        else:
+            name = "-".join(parts)
+        self.fName = f"{name}.{ext}"
 
 
-def download_file(url, output_path):
-    response = requests.get(url, stream=True)
-    total_size = int(response.headers.get("content-length", 0))
+class OTAChecker:
+    def __init__(self) -> None:
+        self.latest: None | OTAInfo = None
 
-    with open(output_path, "wb") as f:
-        downloaded = 0
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                percent = int(downloaded / total_size * 100)
-                if total_size > 0:
-                    print(
-                        f"Downloaded: {percent}% ({downloaded}/{total_size})", end="\r"
-                    )
+    async def fetch_ota(self):
+        async with ClientSession() as s:
+            cookie = BaseCookie({"devsite_wall_acks": "nexus-ota-tos"})
+            s.cookie_jar.update_cookies(cookie)
+            async with s.get("https://developers.google.com/android/ota") as res:
+                soup = LexborHTMLParser(await res.text())
 
-    print(f"\nDownload complete: {output_path}")
-    return output_path
+        targets = soup.css(f'tr[id^="{deviceCodeName}"]')
+        if not targets:
+            print("error: no OTA targets found.")
+            return
 
+        for target in reversed(targets):
+            version = target.css_first("td")
+            if not version:
+                print("error: version not found.")
+                continue
+            versionText = version.text()
+            match = regexPattern.match(versionText)
+            if not match:
+                print("error: match failed.")
+                continue
+            downloadLink = target.css_first("a")
+            if not downloadLink:
+                print("error: download link not found.")
+                continue
+            result = [*match.groups(), downloadLink.attributes["href"]]
+            info = OTAInfo(*result)
+            if info.user is None or "TW" in info.user:
+                self.latest = info
+                break
 
-def calc_sha256(file_path):
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
+        await self.update_ota()
+        create_task(self.fetch_ota())
 
+    async def update_ota(self):
+        if self.latest is None:
+            return
+        filename = self.latest.fName
+        if not path.exists(f"./{filename}"):
+            await self.download()
 
-def main():
-    os.makedirs("./site", exist_ok=True)
-
-    current_build = get_latest()
-
-    ota_links = fetch_ota()
-    if not ota_links:
-        print("No OTA links found for device:", DEVICE)
-        return
-
-    ota_links.sort(reverse=True)
-    latest_ota_url = ota_links[0]
-
-    build = urllib.parse.unquote(latest_ota_url.split("/")[-1]).split("-")[1]
-
-    if build == current_build:
-        print(f"Already processed latest build {build}. Nothing to do.")
-        return
-
-    print(f"Found new build: {build}")
-    print(f"Downloading OTA from: {latest_ota_url}")
-
-    download_file(latest_ota_url, "./ota.zip")
-
-    sha256 = calc_sha256("./ota.zip")
-    print(f"SHA256: {sha256}")
-
-    with open("./ota_source.json", "w") as f:
-        json.dump(
-            {"build": build, "url": latest_ota_url, "sha256": sha256}, f, indent=2
-        )
-
-    print("OTA download complete and ready for processing")
+    async def download(self):
+        if self.latest is None:
+            return
+        print(f"Downloading {self.latest.fullName} as {self.latest.fName}")
+        async with ClientSession() as s:
+            async with s.get(self.latest.DLLink) as res:
+                with open(f"./{self.latest.fName}", "wb") as f:
+                    while chunk := await res.content.read(1024):
+                        f.write(chunk)
+        print(f"Downloaded {self.latest.fName}")
 
 
-if __name__ == "__main__":
-    main()
+# Run the checker
+import asyncio
+
+ota_checker = OTAChecker()
+asyncio.run(ota_checker.fetch_ota())
