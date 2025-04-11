@@ -69,35 +69,16 @@ jobs:
       - name: Build root and rootless OTAs
         run: |
           mkdir -p root rootless
-          touch ota_source.json
           touch root/cheetah.json
           touch rootless/cheetah.json
 
-          OTA_SOURCE=$(cat ota_source.json)
-          STOCK_VERSION=$(echo $OTA_SOURCE | jq -r '.build')
-
           # root variant
           echo "[velithra] Building OTA with KernelSU Next"
-          FLAVOR="ksu_next-${KERNELSU_VERSION}"
-          DEVICE_NAME=$(grep -oP '(?<=ro.product.device=)[^#]*' ota.zip_info.txt | tr -d '\r\n' || echo "cheetah")
-          if [ -z "$DEVICE_NAME" ]; then
-            DEVICE_NAME="cheetah"
-          fi
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          DIRTY_SUFFIX=$(git diff --quiet || echo "-dirty")
+          FLAVOR="root"
 
           avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --prepatched ./patched_boot.img --output ./root/cheetah.zip
-          custota-tool gen-csig --input ./root/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.json
-
-          cat > ./root/cheetah.json << EOF
-          {
-            "version": 2,
-            "full": {
-              "location_ota": "",
-              "location_csig": ""
-            }
-          }
-          EOF
+          custota-tool gen-csig --input ./root/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.csig
+         custota-tool gen-update-info --file ./root/cheetah.json --location ./root/cheetah.csig
 
           # rootless variant
           echo "[velithra] Building stock OTA without root"
@@ -105,36 +86,7 @@ jobs:
 
           avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --output ./rootless/cheetah.zip --rootless
           custota-tool gen-csig --input ./rootless/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.json
-
-          cat > ./rootless/cheetah.json << EOF
-          {
-            "version": 2,
-            "full": {
-              "location_ota": "",
-              "location_csig": ""
-            }
-          }
-          EOF
-
-          # summary
-          cat > ./versions.json << EOF
-          {
-            "device": "${DEVICE_NAME}",
-            "stock_version": "${STOCK_VERSION}",
-            "kernelsu_version": "${KERNELSU_VERSION}",
-            "avbroot_version": "${AVBROOT_VERSION}",
-            "custota_version": "${CUSTOTA_VERSION}",
-            "build_date": "$(date +'%Y-%m-%d %H:%M:%S')",
-            "commit": "${COMMIT_HASH}${DIRTY_SUFFIX}"
-          }
-          EOF
-
-          echo "Build Summary"
-          echo "Device: ${DEVICE_NAME}"
-          echo "Stock version: ${STOCK_VERSION}"
-          echo "KernelSU version: ${KERNELSU_VERSION}"
-          echo "Root OTA: ${ROOT_OTA_FILENAME}"
-          echo "Rootless OTA: ${ROOTLESS_OTA_FILENAME}"
+         custota-tool gen-update-info --file ./rootless/cheetah.json --location ./rootless/cheetah.csig
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
