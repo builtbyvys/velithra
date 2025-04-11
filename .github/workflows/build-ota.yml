@@ -69,8 +69,6 @@ jobs:
       - name: Build root and rootless OTAs
         run: |
           mkdir -p root rootless
-          touch root/cheetah.json
-          touch rootless/cheetah.json
 
           # root variant
           echo "[velithra] Building OTA with KernelSU Next"
