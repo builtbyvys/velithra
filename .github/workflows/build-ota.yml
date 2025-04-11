@@ -1,4 +1,4 @@
-name: Build OTA Updates
+name: Build OTA Update
 
 on:
   schedule:
@@ -41,23 +41,25 @@ jobs:
 
       - name: Download and setup avbroot
         run: |
-          curl -L -o avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip avbroot.zip
-          rm avbroot.zip
-          chmod +x avbroot
-          sudo mv avbroot /usr/local/bin/
+          mkdir -p /tmp/avbroot
+          curl -L -o /tmp/avbroot/avbroot.zip "https://github.com/chenxiaolong/avbroot/releases/download/v${AVBROOT_VERSION}/avbroot-${AVBROOT_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/avbroot/avbroot.zip -d /tmp/avbroot/
+          chmod +x /tmp/avbroot/avbroot
+          sudo mv /tmp/avbroot/avbroot /usr/local/bin/
+          rm -rf /tmp/avbroot
 
       - name: Download and setup custota-tool
         run: |
-          curl -L -o custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
-          unzip custota-tool.zip
-          rm custota-tool.zip
-          chmod +x custota-tool
-          sudo mv custota-tool /usr/local/bin/
+          mkdir -p /tmp/custota
+          curl -L -o /tmp/custota/custota-tool.zip "https://github.com/chenxiaolong/Custota/releases/download/v${CUSTOTA_VERSION}/custota-tool-${CUSTOTA_VERSION}-x86_64-unknown-linux-gnu.zip"
+          unzip /tmp/custota/custota-tool.zip -d /tmp/custota/
+          chmod +x /tmp/custota/custota-tool
+          sudo mv /tmp/custota/custota-tool /usr/local/bin/
+          rm -rf /tmp/custota
 
       - name: Clone or download KernelSU Next
         run: |
-          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '.assets[] | select(.name | contains("boot.img")) | .browser_download_url' | head -n 1)
+          BOOT_IMAGE_URL=$(curl -s https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest | jq -r '[.assets[] | select(.name | contains("boot.img.gz") and contains("6.1.99"))][0].browser_download_url')
 
           if [ -n "$BOOT_IMAGE_URL" ]; then
             echo "Using prebuilt KernelSU Next boot image"
@@ -77,7 +79,7 @@ jobs:
 
       - name: Fetch latest OTA update
         run: |
-          python ./.github/scripts/fetch_ota.py
+          python .github/scripts/build_ota.py
 
       - name: Process OTA with avbroot
         run: |
