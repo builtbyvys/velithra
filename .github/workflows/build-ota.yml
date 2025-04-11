@@ -78,7 +78,7 @@ jobs:
 
           avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --prepatched ./patched_boot.img --output ./root/cheetah.zip
           custota-tool gen-csig --input ./root/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.csig
-         custota-tool gen-update-info --file ./root/cheetah.json --location ./root/cheetah.csig
+          custota-tool gen-update-info --file ./root/cheetah.json --location ./root/cheetah.csig
 
           # rootless variant
           echo "[velithra] Building stock OTA without root"
@@ -86,7 +86,7 @@ jobs:
 
           avbroot ota patch --input ./ota.zip --key-avb ./avb_key.pem --key-ota ./custota_key.pem --cert-ota ./custota_cert.pem --output ./rootless/cheetah.zip --rootless
           custota-tool gen-csig --input ./rootless/cheetah.zip --key ./custota_key.pem --cert ./custota_cert.pem --output ./root/cheetah.json
-         custota-tool gen-update-info --file ./rootless/cheetah.json --location ./rootless/cheetah.csig
+          custota-tool gen-update-info --file ./rootless/cheetah.json --location ./rootless/cheetah.csig
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
